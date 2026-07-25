@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 import { verifyRazorpaySignature } from '../../utils/security';
 import crypto from 'crypto';
 

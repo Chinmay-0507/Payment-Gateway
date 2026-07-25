@@ -1,62 +1,70 @@
-// server/server.ts
-import dotenv from 'dotenv';
+import * as dotenv from 'dotenv';
 dotenv.config();
 
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import Razorpay from 'razorpay';
 import cors from 'cors';
-import crypto from 'crypto'; // Built-in Node.js module for cryptography
+import { createPaymentRouter } from './routes/payments';
+import { webhookRouter } from './routes/webhook';
+import { initDb } from './db';
+
+// --- CRASH CATCHERS ---
+process.on('uncaughtException', (err) => {
+    console.error("FATAL UNCAUGHT EXCEPTION:", err);
+});
+process.on('unhandledRejection', (err) => {
+    console.error("FATAL UNHANDLED REJECTION:", err);
+});
 
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
   throw new Error("Razorpay Key ID or Key Secret is not defined in .env file");
 }
 
-// Initialize Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
+  optionsSuccessStatus: 200
+}));
+
+if (webhookRouter) {
+    app.use('/api/webhook', express.raw({ type: 'application/json' }), webhookRouter);
+}
 app.use(express.json());
 
-// Endpoint 1: Create an Order
-app.post('/create-order', async (req: Request, res: Response) => {
-  const { amount } = req.body;
+const paymentRouter = createPaymentRouter(razorpay);
+if (paymentRouter) {
+    app.use('/api', paymentRouter);
+}
 
-  const options = {
-    amount: amount, // Amount in the smallest currency unit (e.g., paisa)
-    currency: "INR",
-    receipt: `receipt_order_${new Date().getTime()}`,
-  };
-
-  try {
-    const order = await razorpay.orders.create(options);
-    res.json(order);
-  } catch (error) {
-    res.status(500).send(error); 
-  }
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error("Unhandled Error:", err);
+    res.status(500).json({ error: err.message || "Internal Server Error" });
 });
 
-// Endpoint 2: Verify the Payment (CRITICAL SECURITY STEP)
-app.post('/verify-payment', (req: Request, res: Response) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-  const key_secret = process.env.RAZORPAY_KEY_SECRET!;
+// CHANGED TO PORT 4243 TO AVOID ZOMBIE PROCESSES
+const PORT = process.env.PORT || 4243; 
+export let server: any;
 
-  // Create an HMAC SHA256 signature
-  const hmac = crypto.createHmac('sha256', key_secret);
-  hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
-  const generated_signature = hmac.digest('hex');
+console.log("Starting database initialization...");
 
-  if (generated_signature === razorpay_signature) {
-    // Payment is authentic and successful
-    // Here you would typically save the payment details to your database
-    res.json({ success: true, message: "Payment has been verified." });
-  } else {
-    res.status(400).json({ success: false, message: "Payment verification failed." });
-  }
+initDb().then(() => {
+  console.log("Database initialized. Starting Express...");
+  
+  server = app.listen(PORT, () => {
+      console.log(`Node server is ALIVE and listening on port ${PORT}`);
+  });
+
+  server.on('error', (err: any) => {
+      console.error("EXPRESS SERVER ERROR:", err);
+  });
+
+}).catch((err: any) => {
+  console.error("Failed to initialize database:", err);
+  process.exit(1);
 });
-
-const PORT = 4242;
-app.listen(PORT, () => console.log(`Node server listening on port ${PORT}`));
